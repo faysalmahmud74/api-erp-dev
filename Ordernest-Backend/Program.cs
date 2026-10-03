@@ -88,6 +88,7 @@ builder.Services.AddProblemDetails(); // RFC 7807 JSON errors from UseExceptionH
 
 // ---------- 6. App services ----------
 builder.Services.AddScoped<ITokenService, TokenService>();
+builder.Services.AddScoped<IOrderService, OrderService>();
 
 // ---------- 7. Swagger (Swashbuckle) with JWT bearer support ----------
 builder.Services.AddSwaggerGen(options =>
