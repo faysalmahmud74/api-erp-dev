@@ -1,6 +1,68 @@
-@Ordernest_Backend_HostAddress = http://localhost:5028
+@host = https://localhost:7225
 
-GET {{Ordernest_Backend_HostAddress}}/weatherforecast/
-Accept: application/json
+### 1. Login as Admin (run this first, then copy token into the Authorize box in Swagger)
+# @name login
+POST {{host}}/api/auth/login
+Content-Type: application/json
 
-###
+{ "email": "admin@ordernest.local", "password": "Admin#12345" }
+
+### 2. Who am I (paste token below)
+GET {{host}}/api/auth/me
+Authorization: Bearer {{login.response.body.token}}
+
+### 3. Create a category (Admin)
+POST {{host}}/api/categories
+Authorization: Bearer {{login.response.body.token}}
+Content-Type: application/json
+
+{ "name": "Beverages", "description": "Drinks" }
+
+### 4. Create a product (Admin)
+POST {{host}}/api/products
+Authorization: Bearer {{login.response.body.token}}
+Content-Type: application/json
+
+{ "name": "Cola 330ml", "sku": "BEV-001", "barcode": "5449000000996",
+  "price": 1.50, "stockQuantity": 100, "lowStockThreshold": 10, "categoryId": 1 }
+
+### 5. Create an order — 3x Cola (Cashier or Admin)
+POST {{host}}/api/orders
+Authorization: Bearer {{login.response.body.token}}
+Content-Type: application/json
+
+{ "customerId": null, "paymentMethod": "Cash",
+  "items": [ { "productId": 1, "quantity": 3 } ] }
+
+### 6. Check stock went from 100 to 97
+GET {{host}}/api/products/1
+Authorization: Bearer {{login.response.body.token}}
+
+### 7. Cancel order 1 — stock restored to 100 (Admin)
+POST {{host}}/api/orders/1/cancel
+Authorization: Bearer {{login.response.body.token}}
+Content-Type: application/json
+
+{ "reason": "Customer changed mind" }
+
+### 8. Daily sales report (Admin) — from inclusive, to EXCLUSIVE
+GET {{host}}/api/reports/sales/daily?from=2026-10-01&to=2026-10-04
+Authorization: Bearer {{login.response.body.token}}
+
+### 9. Top products (Admin)
+GET {{host}}/api/reports/top-products?from=2026-10-01&to=2026-10-04&take=5
+Authorization: Bearer {{login.response.body.token}}
+
+### 10. Login as Cashier and try an Admin-only action → expect 403
+# @name cashierLogin
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{ "email": "cashier@ordernest.local", "password": "Cashier#12345" }
+
+### 11. Cashier creates a product → 403 Forbidden
+POST {{host}}/api/products
+Authorization: Bearer {{cashierLogin.response.body.token}}
+Content-Type: application/json
+
+{ "name": "X", "sku": "X", "price": 1, "categoryId": 1 }
