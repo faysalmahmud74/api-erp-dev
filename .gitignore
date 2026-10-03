@@ -1,0 +1,24 @@
+## Build results
+bin/
+obj/
+
+## IDE / editor
+.vs/
+.idea/
+*.user
+*.suo
+.vscode/
+
+## Local secrets / overrides (never commit real keys)
+appsettings.*.local.json
+
+## Local databases
+*.db
+*.db-shm
+*.db-wal
+*.mdf
+*.ldf
+
+## OS
+Thumbs.db
+Desktop.ini
