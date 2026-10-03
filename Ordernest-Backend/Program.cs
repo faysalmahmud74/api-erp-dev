@@ -128,9 +128,17 @@ if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();    // serves /swagger/v1/swagger.json
     app.UseSwaggerUI();  // serves /swagger — the interactive docs UI
-}
 
-app.UseHttpsRedirection();
+    // Visiting the root URL also lands on the docs.
+    app.MapGet("/", () => Results.Redirect("/swagger"));
+}
+else
+{
+    // In production, force HTTPS. Skipped in Development so the API and
+    // Swagger work over plain http://localhost:5028 without a redirect
+    // to a port that may not be bound.
+    app.UseHttpsRedirection();
+}
 
 // 2. CORS BEFORE authentication: a browser preflight (OPTIONS) carries no
 //    Authorization header and must not be challenged as unauthenticated.
