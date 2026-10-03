@@ -31,7 +31,7 @@ This document explains **what each part does and why**, in the order we built it
 ## 1. What we built (the big picture)
 
 ```
-React app (localhost:5173)          This API (https://localhost:7225)
+React app (localhost:5173)          This API (http://localhost:5028)
         │                                       │
         │  1. POST /api/auth/login               │
         ├──────────────────────────────────────►│  verifies email+password (Identity)
@@ -71,7 +71,7 @@ Prerequisites: **.NET 9 SDK** (we verified 9.0.312 works). From the project fold
 ```powershell
 cd Ordernest-Backend
 dotnet restore            # download the NuGet packages (done automatically by build too)
-dotnet run --launch-profile https
+dotnet run
 ```
 
 You'll see:
@@ -79,10 +79,12 @@ You'll see:
 ```
 Seeded Admin user admin@ordernest.local
 Seeded Cashier user cashier@ordernest.local
-Now listening on: https://localhost:7225
+Now listening on: http://localhost:5028
 ```
 
-Then open **https://localhost:7225/swagger** — the interactive API documentation. Click the green **Authorize** button, log in through the login endpoint, and paste the token.
+The browser opens **http://localhost:5028/swagger** automatically — the interactive API documentation. Click the green **Authorize** button, log in through the login endpoint, and paste the token.
+
+> Prefer HTTPS in development? Run `dotnet run --launch-profile https` (binds `https://localhost:7225` too) and run `dotnet dev-certs https --trust` once so the browser accepts the dev certificate.
 
 Default accounts (from `appsettings.json`):
 
@@ -145,7 +147,7 @@ Things to understand:
 - **JWT `Key` must be ≥ 32 characters** — the HMAC-SHA256 signing algorithm requires a 256-bit key. The app validates this at startup with a clear error.
 - **`ExpiryMinutes: 720`** — tokens live one shift (12h). This is a deliberate choice: a POS terminal logs in once per shift, so we don't need refresh tokens in v1 (a refresh token exists to renew a *short* token without re-entering credentials — pointless when the session boundary is the shift).
 
-**Why JWT and not cookie sessions?** The React app runs on a different origin (`localhost:5173`) than the API (`localhost:7225`). Cookies across origins require extra security setup and open CSRF concerns. A bearer token in an `Authorization` header has no cross-site semantics, is trivially attached by `fetch`, and needs no server-side session store.
+**Why JWT and not cookie sessions?** The React app runs on a different origin (`localhost:5173`) than the API (`localhost:5028`). Cookies across origins require extra security setup and open CSRF concerns. A bearer token in an `Authorization` header has no cross-site semantics, is trivially attached by `fetch`, and needs no server-side session store.
 
 Also: a LocalDB instance was created once (`sqllocaldb create MSSQLLocalDB` + `start`) — the template machine didn't have one.
 
@@ -508,7 +510,7 @@ Rules of thumb:
 
 ## 13. Step 11 — CORS: letting React call us
 
-Browsers enforce the same-origin policy: a page served from `http://localhost:5173` may not read responses from `https://localhost:7225` unless the API explicitly opts in with `Access-Control-Allow-Origin` headers. It's a **browser** restriction — `curl` and Postman work fine without it, which is why CORS problems only appear in the real frontend.
+Browsers enforce the same-origin policy: a page served from `http://localhost:5173` may not read responses from `http://localhost:5028` unless the API explicitly opts in with `Access-Control-Allow-Origin` headers. It's a **browser** restriction — `curl` and Postman work fine without it, which is why CORS problems only appear in the real frontend.
 
 We configured a policy named `ReactDev` from `Cors:AllowedOrigins` in `appsettings.json`:
 
@@ -524,13 +526,13 @@ Gotchas:
 
 - **Origins must match exactly** — scheme, host, and port. `localhost:5173` ≠ `127.0.0.1:5173` ≠ `localhost:5174` (Vite picks another port when 5173 is busy — CORS is the first thing to check).
 - **Every authenticated call from React triggers a preflight** (`OPTIONS`), because it carries an `Authorization` header and `Content-Type: application/json` — the CORS middleware answers it; that's why it must run before auth.
-- **The dev-certificate trap:** `UseHttpsRedirection` 307-redirects `http://localhost:5028` → `https://localhost:7225`, and unless you ran `dotnet dev-certs https --trust` once, the browser refuses the cert and the request fails with an opaque CORS/network error. Fix once: `dotnet dev-certs https --trust`, then point your React `VITE_API_URL` at `https://localhost:7225`.
+- **HTTPS in development:** HTTPS redirection is disabled in Development, so the API works over plain `http://localhost:5028` — point your React `VITE_API_URL` there. If you prefer HTTPS, run `dotnet run --launch-profile https`, run `dotnet dev-certs https --trust` once (otherwise the browser refuses the self-signed dev certificate), and point the frontend at `https://localhost:7225`.
 
 ---
 
 ## 14. The full API reference
 
-Base URL: `https://localhost:7225` · Swagger UI: `/swagger` · All endpoints except login require `Authorization: Bearer <token>`.
+Base URL: `http://localhost:5028` (or `https://localhost:7225` with the https profile) · Swagger UI: `/swagger` · All endpoints except login require `Authorization: Bearer <token>`.
 
 ### Auth — `/api/auth`
 
@@ -620,9 +622,9 @@ Everything you need to connect a frontend. The concepts apply to any framework; 
 2. **The API base URL** — put it in an environment variable, never hard-coded:
    ```env
    # React (Vite)
-   VITE_API_URL=https://localhost:7225
+   VITE_API_URL=http://localhost:5028
    # Next.js
-   NEXT_PUBLIC_API_URL=https://localhost:7225
+   NEXT_PUBLIC_API_URL=http://localhost:5028
    ```
 
 3. **Your origin must be in `Cors:AllowedOrigins`** in the backend's `appsettings.json` (`http://localhost:5173` for Vite, `http://localhost:3000` for Next are already there). If your dev server picks a different port, add it — exact scheme+host+port.
@@ -681,7 +683,7 @@ A POS is an interactive, client-heavy app: the token lives in the browser, every
 
 ```ts
 // src/api.ts
-const API_URL = import.meta.env.VITE_API_URL ?? 'https://localhost:7225';
+const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:5028';
 
 export async function api<T = any>(path: string, opts: {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
@@ -879,7 +881,7 @@ module.exports = {
 
 ```env
 # .env.local — server-side only (no NEXT_PUBLIC_ prefix!)
-BACKEND_URL=https://localhost:7225
+BACKEND_URL=http://localhost:5028
 ```
 
 Then your client calls `fetch('/api/products', ...)` with no CORS and no public URL. (If you use this, you can even shrink the backend's `Cors:AllowedOrigins` — only direct cross-origin calls need it.)
