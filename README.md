@@ -22,7 +22,7 @@ This document explains **what each part does and why**, in the order we built it
 12. [Step 10 — Migrations: creating the database](#12-step-10--migrations-creating-the-database)
 13. [Step 11 — CORS: letting React call us](#13-step-11--cors-letting-react-call-us)
 14. [The full API reference](#14-the-full-api-reference)
-15. [Connecting the React frontend](#15-connecting-the-react-frontend)
+15. [Using the API from a frontend (React & Next.js)](#15-using-the-api-from-a-frontend-react--nextjs)
 16. [Troubleshooting / common gotchas](#16-troubleshooting--common-gotchas)
 17. [Next steps](#17-next-steps)
 
@@ -605,54 +605,318 @@ Base URL: `https://localhost:7225` · Swagger UI: `/swagger` · All endpoints ex
 
 ---
 
-## 15. Connecting the React frontend
+## 15. Using the API from a frontend (React & Next.js)
 
-```js
-// src/api.js
-const API_URL = import.meta.env.VITE_API_URL ?? 'https://localhost:7225';
+Everything you need to connect a frontend. The concepts apply to any framework; the examples are **React (Vite)** and **Next.js (App Router)**.
 
-export async function login(email, password) {
-  const res = await fetch(`${API_URL}/api/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
-  });
-  if (!res.ok) throw new Error('Login failed');
-  return res.json(); // { token, expiresAtUtc, roles, ... }
+### 15.1 One-time setup
+
+1. **Trust the dev certificate** (once per machine):
+   ```powershell
+   dotnet dev-certs https --trust
+   ```
+   Without this, the browser refuses the API's self-signed dev certificate and every request fails with an opaque network/CORS error.
+
+2. **The API base URL** — put it in an environment variable, never hard-coded:
+   ```env
+   # React (Vite)
+   VITE_API_URL=https://localhost:7225
+   # Next.js
+   NEXT_PUBLIC_API_URL=https://localhost:7225
+   ```
+
+3. **Your origin must be in `Cors:AllowedOrigins`** in the backend's `appsettings.json` (`http://localhost:5173` for Vite, `http://localhost:3000` for Next are already there). If your dev server picks a different port, add it — exact scheme+host+port.
+
+### 15.2 The request flow, at a glance
+
+```
+Login page ──POST /api/auth/login──► { token, roles, ... } ──► store token
+                                                                  │
+Every screen ──GET/POST /api/... with "Authorization: Bearer <token>"──► data
+              │
+              ├─ 401 (no/invalid/expired token)  → clear token, show login page
+              ├─ 403 (valid token, wrong role)   → show "not allowed"
+              └─ 400 (validation/business error) → show response.message
+```
+
+### 15.3 TypeScript types (match the backend DTOs exactly)
+
+```ts
+// src/types.ts — mirrors the C# DTO records
+export interface AuthResponse {
+  token: string; expiresAtUtc: string; userId: string;
+  email: string; fullName: string; roles: string[];        // "Admin" | "Cashier"
 }
 
-export async function api(path, { method = 'GET', body, token } = {}) {
+export interface ProductDto {
+  id: number; name: string; sku: string; barcode: string | null;
+  price: number; costPrice: number | null; stockQuantity: number;
+  lowStockThreshold: number; categoryId: number; categoryName: string;
+  isActive: boolean; createdAt: string; updatedAt: string | null;
+}
+
+export interface PagedResult<T> { items: T[]; page: number; pageSize: number;
+                                  totalCount: number; totalPages: number; }
+
+export interface CreateOrderRequest {
+  customerId: number | null;
+  paymentMethod: 'Cash' | 'Card' | 'Mobile' | 'Other';
+  notes?: string | null;
+  items: { productId: number; quantity: number; lineDiscount?: number }[];
+}
+
+export interface OrderDto {
+  id: number; orderNumber: string; customerId: number | null; customerName: string | null;
+  cashierName: string; subTotal: number; discountAmount: number; totalAmount: number;
+  status: string; paymentMethod: string; createdAt: string;
+  items: { productName: string; unitPrice: number; quantity: number; lineTotal: number }[];
+}
+```
+
+### 15.4 React (Vite) — the recommended approach
+
+A POS is an interactive, client-heavy app: the token lives in the browser, every request carries it. The pattern has three small pieces — **an API client**, **an auth context**, and **the pages**.
+
+**Step 1 — the API client.** One function for all requests. This is where the 401/403 policy lives, in one place:
+
+```ts
+// src/api.ts
+const API_URL = import.meta.env.VITE_API_URL ?? 'https://localhost:7225';
+
+export async function api<T = any>(path: string, opts: {
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  body?: unknown;
+  token?: string | null;
+} = {}): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
-    method,
+    method: opts.method ?? 'GET',
     headers: {
       'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
     },
-    body: body ? JSON.stringify(body) : undefined,
+    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
   });
-  if (res.status === 401) window.location.href = '/login'; // token expired
-  if (!res.ok) throw new Error((await res.json()).message ?? 'Request failed');
+
+  if (res.status === 401) {          // token missing/expired → force re-login
+    localStorage.removeItem('token');
+    window.location.href = '/login';
+    throw new Error('Session expired');
+  }
+  if (!res.ok) {                     // 403 "not allowed", 400 business error, ...
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.message ?? `Request failed (${res.status})`);
+  }
+  if (res.status === 204) return undefined as T;
   return res.json();
 }
 
-// usage
-const { token } = await login('cashier@ordernest.local', 'Cashier#12345');
-localStorage.setItem('token', token);
-const products = await api('/api/products', { token });
-
-const order = await api('/api/orders', {
-  method: 'POST', token,
-  body: { customerId: null, paymentMethod: 'Cash',
-          items: [{ productId: 1, quantity: 3 }] },
-});
+export const login = (email: string, password: string) =>
+  api<AuthResponse>('/api/auth/login', { method: 'POST', body: { email, password } });
 ```
 
-Setup checklist for the frontend:
+**Step 2 — the auth context.** Logs in, keeps the user, validates the stored token on page load (the `me` endpoint tells you if a saved token is still good):
 
-1. `dotnet dev-certs https --trust` (once) — otherwise the browser refuses the API's dev certificate.
-2. `.env` in the React app: `VITE_API_URL=https://localhost:7225`
-3. Store the token (localStorage is fine for v1) and attach it to every request.
-4. Treat **401** as "log in again" and **403** as "not allowed" — different UX.
+```tsx
+// src/auth.tsx
+import { createContext, useContext, useEffect, useState } from 'react';
+
+interface AuthUser { userId: string; email: string; fullName: string; roles: string[] }
+interface AuthCtx {
+  user: AuthUser | null; token: string | null; loading: boolean; isAdmin: boolean;
+  signIn(email: string, password: string): Promise<void>;
+  signOut(): void;
+}
+
+const Ctx = createContext<AuthCtx | null>(null);
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [token, setToken] = useState<string | null>(() => localStorage.getItem('token'));
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      if (token) {
+        try {
+          const me = await api<any>('/api/auth/me', { token });
+          setUser({ userId: me.id, email: me.email, fullName: me.fullName, roles: me.roles });
+        } catch { signOut(); }        // stored token is stale → back to login
+      }
+      setLoading(false);
+    })();
+  }, [token]);
+
+  async function signIn(email: string, password: string) {
+    const res = await login(email, password);
+    localStorage.setItem('token', res.token);
+    setToken(res.token);
+    setUser({ userId: res.userId, email: res.email, fullName: res.fullName, roles: res.roles });
+  }
+
+  function signOut() {
+    localStorage.removeItem('token');
+    setToken(null); setUser(null);
+  }
+
+  return <Ctx.Provider value={{ user, token, loading,
+    isAdmin: user?.roles.includes('Admin') ?? false, signIn, signOut }}>
+    {children}
+  </Ctx.Provider>;
+}
+
+export const useAuth = () => {
+  const ctx = useContext(Ctx);
+  if (!ctx) throw new Error('useAuth must be used inside <AuthProvider>');
+  return ctx;
+};
+```
+
+Wrap your app with `<AuthProvider>` and gate the router: `loading ? <Spinner/> : token ? <App/> : <LoginPage/>`.
+
+**Step 3 — a real POS page.** This ties the whole API together — search products, build a cart, place the order (ids and quantities only!), show the receipt number:
+
+```tsx
+// src/CheckoutPage.tsx
+import { useEffect, useState } from 'react';
+import { api, useAuth } from './api-and-auth';
+import type { ProductDto, OrderDto } from './types';
+
+export default function CheckoutPage() {
+  const { token } = useAuth();
+  const [search, setSearch] = useState('');
+  const [products, setProducts] = useState<ProductDto[]>([]);
+  const [cart, setCart] = useState<Map<number, number>>(new Map()); // productId → qty
+  const [receipt, setReceipt] = useState<OrderDto | null>(null);
+
+  useEffect(() => {
+    const t = setTimeout(async () => {
+      const page = await api<{ items: ProductDto[] }>(
+        `/api/products?search=${encodeURIComponent(search)}&pageSize=25`, { token });
+      setProducts(page.items);
+    }, 250);                                          // debounce typing
+    return () => clearTimeout(t);
+  }, [search, token]);
+
+  async function checkout() {
+    try {
+      const order = await api<OrderDto>('/api/orders', {
+        method: 'POST', token,
+        body: {
+          customerId: null, paymentMethod: 'Cash',
+          // NOTE: only ids + quantities — the server prices the cart
+          items: [...cart].map(([productId, quantity]) => ({ productId, quantity })),
+        },
+      });
+      setReceipt(order); setCart(new Map());
+    } catch (e: any) {
+      alert(e.message);   // e.g. "Insufficient stock for 'Cola 330ml': 97 left, 500 requested."
+    }
+  }
+
+  return (
+    <div>
+      <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Scan or search" />
+      {products.map(p => (
+        <div key={p.id}>
+          {p.name} — {p.price} ({p.stockQuantity} left)
+          <button onClick={() => setCart(m => new Map(m).set(p.id, (m.get(p.id) ?? 0) + 1))}>
+            Add
+          </button>
+        </div>
+      ))}
+      <button onClick={checkout} disabled={cart.size === 0}>Charge {total}</button>
+      {receipt && <div>Receipt {receipt.orderNumber} — total {receipt.totalAmount}</div>}
+    </div>
+  );
+}
+```
+
+Useful extras once this runs:
+
+- **Barcode scanner**: a USB scanner types the barcode + Enter into a focused input. Send it to `GET /api/products/barcode/{barcode}` for an instant product line.
+- **Role-based UI**: hide admin-only buttons behind `isAdmin` (the backend enforces the rules regardless — the UI toggle is just politeness).
+- **Low-stock badge**: `GET /api/products/low-stock` for the restocking list.
+
+### 15.5 Next.js (App Router)
+
+A POS is interactive and client-heavy, so the honest guidance is: **use the same client-side pattern as Vite** — client components, token in `localStorage`, the `api()` client from §15.4. Server components can't see the browser's token, so fetching with them means duplicating the auth state server-side (cookies). That's an optimization for SEO/landing pages, not for a cash-register screen.
+
+That said, Next gives you two structural choices:
+
+**Option A — direct calls from client components (simplest).**
+Same code as §15.4. `NEXT_PUBLIC_API_URL` instead of `VITE_API_URL`. CORS applies as usual.
+
+```tsx
+// app/page.tsx — a client component
+'use client';
+import { useEffect, useState } from 'react';
+import { api } from '@/lib/api';
+import type { ProductDto } from '@/types';
+
+export default function Home() {
+  const [products, setProducts] = useState<ProductDto[]>([]);
+  useEffect(() => {
+    api<{ items: ProductDto[] }>('/api/products?pageSize=12', { token: localStorage.getItem('token') })
+      .then(p => setProducts(p.items));
+  }, []);
+  // ...render
+}
+```
+
+**Option B — proxy the API through Next (no CORS at all).**
+With a rewrite, the browser talks only to Next (`/api/...`), and Next forwards to the backend server-side — same-origin, so CORS never enters the picture (handy in production where you'd also hide the backend URL):
+
+```js
+// next.config.js
+module.exports = {
+  async rewrites() {
+    return [
+      { source: '/api/:path*', destination: `${process.env.BACKEND_URL}/api/:path*` },
+    ];
+  },
+};
+```
+
+```env
+# .env.local — server-side only (no NEXT_PUBLIC_ prefix!)
+BACKEND_URL=https://localhost:7225
+```
+
+Then your client calls `fetch('/api/products', ...)` with no CORS and no public URL. (If you use this, you can even shrink the backend's `Cors:AllowedOrigins` — only direct cross-origin calls need it.)
+
+**Option C — cookie-based auth for server components (advanced).**
+Store the JWT in an `httpOnly` cookie instead of `localStorage` so server components can read it on every request. You'd set the cookie in a Next **route handler** that proxies `/api/auth/login`:
+
+```ts
+// app/api/login/route.ts
+import { NextResponse } from 'next/server';
+export async function POST(req: Request) {
+  const { email, password } = await req.json();
+  const res = await fetch(`${process.env.BACKEND_URL}/api/auth/login`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) return NextResponse.json({ message: 'Invalid credentials' }, { status: 401 });
+  const { token, ...user } = await res.json();
+  const response = NextResponse.json(user);
+  response.cookies.set('token', token, { httpOnly: true, sameSite: 'lax', path: '/' });
+  return response;
+}
+```
+
+Server components (or route handlers) then read `cookies().get('token')` and attach `Authorization: Bearer ...` when calling the backend. Note: if you ever go down this path, the browser would send the cookie cross-origin only with `credentials: 'include'` + backend `AllowCredentials()` + an exact-origin CORS policy — a deliberate reconfiguration, not the default.
+
+### 15.6 Treating 401 and 403 differently
+
+This single distinction shapes your whole UX:
+
+| Status | Meaning | What the UI should do |
+|---|---|---|
+| **401** | No token / invalid / expired | Clear the token, redirect to login ("session expired, please sign in again") |
+| **403** | Valid user, wrong role (e.g. Cashier opening an Admin screen) | Stay logged in, show "you don't have permission" — do NOT log them out |
+| **400** | Validation or business error | Show `response.message` ("Insufficient stock for 'Cola 330ml'...") |
+
+And remember: **registration is Admin-only** (`POST /api/auth/register`) — a POS has no self-signup. Staff accounts are created from an admin screen (use `GET /api/users`, `PUT /api/users/{id}/roles`) once you build it.
 
 ---
 
@@ -679,7 +943,7 @@ Setup checklist for the frontend:
 
 Ideas, in rough order of value:
 
-1. **React wiring** — auth context (login/me/logout), product grid with barcode search, cart → order creation, receipt view.
+1. **Build the frontend with §15 as the starting point** — the auth context, API client, and checkout example there are ready to paste; add a product grid with barcode search, a customer picker, and a receipt view.
 2. **Payments** — record payment at checkout; the `PaymentMethod` enum already exists.
 3. **Receipt printing** — the `OrderDto` contains everything a 80mm thermal printer needs; add a formatting endpoint or do it client-side.
 4. **Refresh tokens / shorter access tokens** — needed only when you add an online storefront or long-lived mobile sessions; the 12h shift token covers POS v1.
